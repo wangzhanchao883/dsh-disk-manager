@@ -1,0 +1,5 @@
+node_modules/
+test/
+dev-run.mjs
+dev-tool.mjs
+*.log
