@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "targetDrive": "D",
+  "abandonDays": 180,
+  "minSizeMB": 50,
+  "undoLog": true
+}
