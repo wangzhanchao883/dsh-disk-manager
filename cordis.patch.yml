@@ -1,0 +1,5 @@
+# dsh-disk-manager bundle patch layer.
+# 安装本包到 profile 后,host 端加载主入口(扫描/分类/执行引擎)。
+- insert:
+    - id: dsh-disk-manager
+      name: dsh-disk-manager
