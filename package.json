@@ -1,0 +1,73 @@
+{
+  "name": "dsh-disk-manager",
+  "version": "0.1.0",
+  "description": "C-drive planner for DeepSeek Harness: scan the whole C drive, classify every big item into A/B/C/D/E/P (safe cache / relocatable / junction-movable / abandoned software / config-memory redline / personal files), LLM fallback + human confirm, then delete/move/redirect on demand with strong redline + dry-run/undo safeguards. C盘空间规划整理大师:扫描整 C 盘,分门别类给出正确动作,动手前先预览,红线配置/记忆永不自动执行。",
+  "type": "module",
+  "main": "index.mjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangzhanchao883/dsh-disk-manager.git"
+  },
+  "homepage": "https://github.com/wangzhanchao883/dsh-disk-manager",
+  "bugs": {
+    "url": "https://github.com/wangzhanchao883/dsh-disk-manager/issues"
+  },
+  "author": "wangzhanchao883",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "config.mjs",
+    "core/",
+    "cordis.patch.yml",
+    "config.example.json",
+    "README.md",
+    "screenshots.json",
+    "assets/screenshots/"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "dev": "node dev-run.mjs",
+    "dev:auto": "node dev-run.mjs --auto doc"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0"
+  },
+  "engines": {
+    "node": "^22.0.0 || >=24"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "plugin",
+    "disk-cleanup",
+    "disk-manager",
+    "storage",
+    "junction",
+    "c-clean",
+    "windows",
+    "powershell",
+    "cache-cleaner"
+  ],
+  "license": "MIT"
+}
