@@ -1,6 +1,6 @@
 {
   "name": "dsh-disk-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "C-drive planner for DeepSeek Harness: scan the whole C drive, classify every big item into A/B/C/D/E/P (safe cache / relocatable / junction-movable / abandoned software / config-memory redline / personal files), LLM fallback + human confirm, then delete/move/redirect on demand with strong redline + dry-run/undo safeguards. C盘空间规划整理大师:扫描整 C 盘,分门别类给出正确动作,动手前先预览,红线配置/记忆永不自动执行。",
   "type": "module",
   "main": "index.mjs",
@@ -36,18 +36,13 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
     }
   },
-  "scripts": {
-    "dev": "node dev-run.mjs",
-    "dev:auto": "node dev-run.mjs --auto doc"
-  },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0"

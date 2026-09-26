@@ -2,7 +2,9 @@
  * 以经典脚本形式注册到 window.__ModuleLoader__;工厂内用 require 取 React,
  * 不能用 JSX(无构建步骤),一律 React.createElement。
  * 说明:扫描/分类/执行由模型驱动的工具(disk_scan/disk_preview/disk_execute)
- *       在对话里呈现与确认;本页负责用户配置(目标盘/启用)。 */
+ *       在对话里呈现与确认;本页负责用户配置(目标盘/启用)。
+ * 0.1.7 变更:客户端设置服务 `settingsScope` 被整体移除,改用 `configForms`;
+ *       host 侧不再注册 schema,改由 `export const Config` 声明字段。 */
 window.__ModuleLoader__.load({
   id: "dsh-disk-manager",
   factory: (require) => {
@@ -40,9 +42,18 @@ window.__ModuleLoader__.load({
       startScanHint: "点击后在对话里运行扫描并按类别返回清单;扫描耗时约几分钟。",
       scanning: "扫描中…",
       scanRunning: ">>> 已发起扫描,请到当前对话查看结果。",
+      scanDone: ">>> 扫描已完成,结果同时写入了对话:",
       scanNoSession: ">>> 无会话,请先在对话新建一个会话。",
       scanUnknown: ">>> 未知命令: /disk_scan(插件未加载该命令)。",
       scanFail: "发起失败:",
+      scanTarget: "目标对话",
+      scanElapsed: "已用",
+      scanSeconds: "秒",
+      scanStuck: ">>> 宿主 90 秒仍未返回受理结果,可能卡在会话受理。仍在等待;也可以直接在对话里输入 /disk_scan。",
+      scanRejected: ">>> 宿主没有受理这条命令(命令未匹配,或目标会话当前不可用)。请在对话里直接输入 /disk_scan。",
+      scanNoText: ">>> 命令已执行,但宿主没有返回报告文本。",
+      scanRejectedWrite: "宿主拒绝了这次写入(设置服务未接受该值)。",
+      scanReport: "扫描报告(同时也写进了对话):",
     };
 
     const en = {
@@ -69,9 +80,18 @@ window.__ModuleLoader__.load({
       startScanHint: "Runs the scan in the conversation and returns categorized results; takes a few minutes.",
       scanning: "Scanning…",
       scanRunning: ">>> Scan started, check the current conversation for results.",
+      scanDone: ">>> Scan finished — the report was also written into the conversation:",
       scanNoSession: ">>> No session, create one in the chat first.",
       scanUnknown: ">>> Unknown command: /disk_scan (plugin not loaded).",
       scanFail: "Failed to start:",
+      scanTarget: "target conversation",
+      scanElapsed: "elapsed",
+      scanSeconds: "s",
+      scanStuck: ">>> The host has not answered the admission after 90s — still waiting; you can also type /disk_scan in the conversation.",
+      scanRejected: ">>> The host did not admit this command (no match, or the target session is unavailable). Type /disk_scan in the conversation instead.",
+      scanNoText: ">>> The command ran, but the host returned no report text.",
+      scanRejectedWrite: "The host rejected this write (the settings service did not accept the value).",
+      scanReport: "Scan report (also written into the conversation):",
     };
 
     const STYLES = [
@@ -84,13 +104,15 @@ window.__ModuleLoader__.load({
       ".dsk-hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}",
       ".dsk-switch{display:flex;align-items:center;gap:8px;margin-bottom:6px}",
       ".dsk-switch input{accent-color:var(--dsw-alias-state-business-primary)}",
-      ".dsk-status{font-size:12px;color:var(--dsw-alias-label-tertiary);min-height:16px}",
+      ".dsk-status{font-size:12px;color:var(--dsw-alias-label-tertiary);min-height:16px;white-space:pre-wrap}",
       ".dsk-row{display:flex;gap:12px}",
       ".dsk-note{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);white-space:pre-wrap}",
       ".dsk-static{font-size:13px;color:var(--dsw-alias-label-primary);padding:6px 0}",
       ".dsk-summary{font-size:13px;line-height:1.7;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-left:4px solid var(--dsw-alias-state-business-primary);border-radius:8px;padding:12px 14px;white-space:pre-wrap}",
       ".dsk-btn{height:32px;padding:0 16px;border:1px solid var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-primary);color:#fff;border-radius:6px;font:inherit;font-size:13px;cursor:pointer}",
       ".dsk-btn:disabled{opacity:.6;cursor:not-allowed}",
+      ".dsk-report{margin-top:10px}",
+      ".dsk-report pre{margin:6px 0 0;max-height:280px;overflow:auto;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:8px 10px;color:var(--dsw-alias-label-primary)}",
     ].join("");
 
     function Field({ label, hint, children }) {
@@ -113,24 +135,69 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = useState("");
       const [scanMsg, setScanMsg] = useState("");
       const [scanning, setScanning] = useState(false);
+      const [report, setReport] = useState("");
+      // 盘符列表:先用兜底值渲染,再向宿主只读路由取真实盘符替换
+      // (2026-09-26 修:原先硬编码 C~H,本机只有 C/D 也会列出 E~H)。
+      const [driveList, setDriveList] = useState(() => (Array.isArray(drives) && drives.length ? drives : ["C", "D", "E", "F", "G", "H"]));
+      useEffect(() => {
+        let alive = true;
+        Promise.resolve()
+          .then(() => fetch("/dsh-disk-manager/drives", { headers: { accept: "application/json" }, credentials: "same-origin" }))
+          .then((r) => (r && r.ok ? r.json() : null))
+          .then((j) => {
+            if (!alive || !j || !Array.isArray(j.drives) || !j.drives.length) return;
+            setDriveList(j.drives.map((d) => String(d).toUpperCase()));
+          })
+          .catch(() => { /* 路由不可用(旧版/桌面版)则保留兜底值 */ });
+        return () => { alive = false; };
+      }, []);
+      // 写值乐观回显:宿主回执要一个来回(实测约 1.4 秒),这段时间受控组件会把
+      // 用户刚选的值弹回旧值,看起来就像"没选上"。本地先顶上,宿主视图追上再撤。
+      const [optimistic, setOptimistic] = useState({});
       const statusTimer = useRef(null);
       useEffect(() => scope.subscribe(() => setSnap(scope.getSnapshot())), [scope]);
+      useEffect(() => {
+        setOptimistic((prev) => {
+          const keys = Object.keys(prev);
+          if (!keys.length) return prev;
+          const v = scope.getSnapshot().value || {};
+          const next = { ...prev };
+          let changed = false;
+          for (const k of keys) if (v[k] === prev[k]) { delete next[k]; changed = true; }
+          return changed ? next : prev;
+        });
+      }, [snap, scope]);
       useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
       const flash = (msg) => {
         setStatus(msg);
         if (statusTimer.current) clearTimeout(statusTimer.current);
         statusTimer.current = setTimeout(() => setStatus(""), 2500);
       };
-      const save = (field, v) => {
-        Promise.resolve(scope.set(field, v))
-          .then(() => flash(t("saved")))
-          .catch((err) => flash(`${t("error")} ${err && err.message ? err.message : String(err)}`));
+      const dropOptimistic = (field) => setOptimistic((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, field)) return prev;
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+      const save = (field, value) => {
+        setOptimistic((prev) => ({ ...prev, [field]: value }));
+        Promise.resolve(scope.set(field, value))
+          .then((accepted) => {
+            // set() 返回 false = 宿主没收下这次写入;旧代码在这里照样显示"已保存",是假成功。
+            if (accepted === false) { dropOptimistic(field); flash(`${t("error")}${t("scanRejectedWrite")}`); return; }
+            flash(t("saved"));
+          })
+          .catch((err) => {
+            dropOptimistic(field);
+            flash(`${t("error")} ${err && err.message ? err.message : String(err)}`);
+          });
       };
       const doScan = () => {
         if (!runScan || scanning) return;
         setScanning(true);
         setScanMsg("");
-        Promise.resolve(runScan())
+        setReport("");
+        Promise.resolve(runScan({ progress: (m) => setScanMsg(m), report: (txt) => setReport(txt) }))
           .then((res) => setScanMsg(res || t("scanRunning")))
           .catch((err) => setScanMsg(`${t("scanFail")} ${err && err.message ? err.message : String(err)}`))
           .finally(() => setScanning(false));
@@ -139,7 +206,9 @@ window.__ModuleLoader__.load({
       if (snap.status === "loading") return h("p", { className: "dsk-status" }, t("loading"));
       if (snap.status === "unavailable") return h("p", { className: "dsk-status" }, t("unavailable"));
       const v = snap.value || {};
-      const driveOptions = (drives || []).map((d) => ({ value: d, label: d + ": 盘" }));
+      // 本地乐观值优先(宿主视图到达后由上面的 effect 撤掉)
+      const val = (k) => (Object.prototype.hasOwnProperty.call(optimistic, k) ? optimistic[k] : v[k]);
+      const driveOptions = (driveList || []).map((d) => ({ value: d, label: d + ": 盘" }));
 
       return h("div", { className: "dsk-config" }, [
         h("div", { className: "dsk-summary" }, t("summary")),
@@ -147,18 +216,22 @@ window.__ModuleLoader__.load({
           h("button", { className: "dsk-btn", disabled: scanning, onClick: doScan }, scanning ? t("scanning") : t("startScan")),
           h("div", { className: "dsk-hint" }, t("startScanHint")),
           h("div", { className: "dsk-status" }, scanMsg),
+          report ? h("div", { className: "dsk-report" }, [
+            h("div", { className: "dsk-hint" }, t("scanReport")),
+            h("pre", null, report),
+          ]) : null,
         ]),
         h("div", { className: "dsk-group" }, [
           h("h3", null, t("general")),
           h("div", { className: "dsk-switch" }, [
-            h("input", { type: "checkbox", id: "dsk-enabled", checked: !!v.enabled, onChange: (e) => save("enabled", e.target.checked) }),
+            h("input", { type: "checkbox", id: "dsk-enabled", checked: !!val("enabled"), onChange: (e) => save("enabled", e.target.checked) }),
             h("label", { htmlFor: "dsk-enabled" }, t("enabled")),
           ]),
           h("div", { className: "dsk-hint" }, t("enabledHint")),
           Field({
             label: t("targetDrive"),
             hint: t("targetDriveHint"),
-            children: h(SelectInput, { value: v.targetDrive || "", onCommit: (val) => save("targetDrive", val), options: driveOptions, placeholder: t("targetDrivePlaceholder") }),
+            children: h(SelectInput, { value: val("targetDrive") || "", onCommit: (val2) => save("targetDrive", val2), options: driveOptions, placeholder: t("targetDrivePlaceholder") }),
           }),
           Field({
             label: t("abandon"),
@@ -190,34 +263,85 @@ window.__ModuleLoader__.load({
       }, "dsh-disk-manager: dictionaries");
 
       const t = ctx.locale.bind(NS);
-      const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE });
+      // 0.1.7：ctx.settingsScope 整个被移除，改由 configForms.get(条目 id) 取共享表单。
+      // getSnapshot()/subscribe()/set(field, value) 与旧 scope 同名同义 → 组件体无需改动。
+      const scope = ctx.configForms.get(SETTINGS_NAMESPACE);
       const drives = ["C", "D", "E", "F", "G", "H"]; // 兜底;实际以配置/扫描检测为准
-      const connection = ctx.get("connection");
-      const remote = ctx.get("remote");
-      const sessions = ctx.get("sessions");
-      const runScan = async () => {
+      // 选"要发到哪个对话"。
+      // 2026-09-26 实测:dsh-api-session-controller 的列表快照是 {ids, byId, phase},
+      // **没有 current 字段** —— 所以现实里总是走"最近更新过的非空白会话"(= 用户
+      // 正在看的那个对话);下面保留 current 分支只为将来真有该字段时生效。
+      const pickTarget = (sessions) => {
+        const s = (sessions && sessions.list && sessions.list.getSnapshot && sessions.list.getSnapshot()) || {};
+        const byId = s.byId || {};
+        const ids = Array.isArray(s.ids) ? s.ids : [];
+        const row = (id) => byId[id] || {};
+        const short = (id) => String(id).replace(/^session-/, "").slice(0, 8);
+        const shape = (id) => ({
+          id,
+          title: `${row(id).displayTitle || short(id)} (${short(id)})`,
+        });
+        if (s.current && !row(s.current).blank) return shape(s.current);
+        const rows = ids
+          .map((id) => ({ id, ...row(id) }))
+          .filter((r) => r.id && !r.blank && r.origin !== "subagent")
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        if (rows[0]) return shape(rows[0].id);
+        if (s.current) return shape(s.current);
+        if (ids.length) return shape(ids[ids.length - 1]);
+        return { id: void 0, title: void 0 };
+      };
+      /**
+       * 让 host 执行 /disk_scan。
+       * 2026-09-26 改：不再用 20 秒 race 把回执丢掉 —— 整盘扫描要 3~4 分钟，
+       * 旧写法超时后只显示"已发起扫描"，RPC 后来的结果(以及"宿主根本没受理")
+       * 全被静默吞掉，用户永远看不到结果也不知道失败。现在全程等，并：
+       *   - 用 progress 回调持续显示"扫描中…（目标对话，已用 Ns）"；
+       *   - 拿到报告文本就回填到设置页(report 回调)，对话里那份仍由 host 写；
+       *   - 区分"宿主未受理(value undefined)"与"超时没返回"，给不同提示。
+       * 另外：服务引用改成每次点击现取 —— apply 时抓到的引用在页面重连/实例
+       * 重启后可能已经失效，表现为"已发起扫描但什么也没发生"。
+       */
+      const runScan = async (hooks = {}) => {
+        const progress = typeof hooks.progress === "function" ? hooks.progress : () => {};
+        const report = typeof hooks.report === "function" ? hooks.report : () => {};
         try {
-          if (!connection) return `${t("scanFail")} connection 不可用`;
-          if (!sessions || !sessions.list) return `${t("scanFail")} sessions 不可用`;
-          // 1) 取当前会话(就是你正在看的这个对话);为空则回退到列表里最后一个
-          const cur = sessions.list.getSnapshot();
-          const targetId = cur.current || (cur.ids && cur.ids.length ? cur.ids[cur.ids.length - 1] : void 0);
-          if (!targetId) return t("scanNoSession");
-          // 2) 确保它在前台(已选中则无副作用)
-          try { if (sessions.open) sessions.open(targetId); } catch { /* 已在前台则忽略 */ }
-          // 3) 给该会话发一条用户消息 "/disk_scan",host 会走命令注册表执行、结果渲染进对话。
-          //    用 session.prompt(入队、立即返回),避免像 commands.execute 那样长时间等待/挂住。
-          const tz = (Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || "Asia/Shanghai";
-          const { result } = await connection.api.sessions.prompt({
-            sessionId: targetId,
-            mode: "queue",
-            content: [{ type: "text", text: "/disk_scan" }],
-            clientTimeZone: tz,
-          });
-          if (result && result.ok === false) {
-            return `${t("scanFail")}${result.error && result.error.message ? " " + result.error.message : ""}`;
+          const remote = ctx.get("remote");
+          const remoteCommands = ctx.get("remote.commands") || (remote && remote.commands);
+          const sessionsNow = ctx.get("sessions");
+          if (!remoteCommands || typeof remoteCommands.execute !== "function") return `${t("scanFail")} remote.commands 不可用`;
+          if (!sessionsNow || !sessionsNow.list) return `${t("scanFail")} sessions 不可用`;
+          const target = pickTarget(sessionsNow);
+          if (!target.id) return t("scanNoSession");
+          // 确保目标会话在前台(已选中则无副作用)
+          try { if (sessionsNow.open) sessionsNow.open(target.id); } catch { /* 已在前台则忽略 */ }
+          const where = `${t("scanTarget")}: ${target.title}`;
+          const startedAt = Date.now();
+          progress(`${t("scanning")}（${where}，${t("scanElapsed")} 0 ${t("scanSeconds")}）`);
+          const tick = setInterval(() => {
+            progress(`${t("scanning")}（${where}，${t("scanElapsed")} ${Math.round((Date.now() - startedAt) / 1000)} ${t("scanSeconds")}）`);
+          }, 2000);
+          const stuck = setTimeout(() => progress(`${t("scanStuck")}（${where}）`), 90000);
+          try {
+            let outcome;
+            try {
+              outcome = await remoteCommands.execute(target.id, "/disk_scan", []);
+            } catch (e) {
+              outcome = { ok: false, error: { message: e && e.message ? e.message : String(e) } };
+            }
+            if (outcome && outcome.ok === false) {
+              return `${t("scanFail")}${outcome.error && outcome.error.message ? " " + outcome.error.message : ""}（${where}）`;
+            }
+            const value = outcome ? outcome.value : void 0;
+            const text = value && value.result ? value.result.text : void 0;
+            if (text) { report(text); return `${t("scanDone")}（${where}）`; }
+            // value 为 undefined = 宿主没匹配到 /disk_scan(或该会话不可用)，什么都没跑
+            if (value === void 0 || value === null) return `${t("scanRejected")}（${where}）`;
+            return `${t("scanNoText")}（${where}）`;
+          } finally {
+            clearInterval(tick);
+            clearTimeout(stuck);
           }
-          return t("scanRunning");
         } catch (e) {
           return `${t("scanFail")}${e && e.message ? " " + e.message : ""}`;
         }
@@ -236,7 +360,7 @@ window.__ModuleLoader__.load({
 
     module.exports = {
       name: "dsh-disk-manager",
-      inject: ["slots", "locale", "settingsScope", "connection", "remote", "remote.commands", "sessions"],
+      inject: ["slots", "locale", "configForms", "remote", "remote.commands", "sessions"],
       apply,
     };
     return module.exports;

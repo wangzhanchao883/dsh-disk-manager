@@ -44,8 +44,9 @@
 
 - **Windows**(扫描与执行依赖 PowerShell;junction/删除用系统原生能力)。
 - **Node.js** ≥ 22(DSH 运行时)。
-- **DeepSeek Harness** web profile(插件安装进 web 使用)。
-- 可选:DSH 自带 LLM(用于未知目录的 LLM 兜底分类)。
+- **DeepSeek Harness ≥ 0.1.7**(web profile,插件安装进 web 使用)。
+  - 设置页依赖 0.1.7 的客户端 `configForms` 契约;在更老的 DSH 上 host 侧工具照常可用,只是设置页不会出现。
+- LLM 兜底(可选,不配也能用):走宿主 `ctx.llm.stream()`。模型路由优先取宿主的 **agent 默认模型**,取不到则用第一个可用 provider 的第一个模型;按项目规则**默认关闭推理**(`reasoningEffort:"off"`)。拿不到模型路由时,未知目录降级为"需人工确认",不影响扫描。
 
 ## 分类引擎:静态规则 + LLM 兜底 + 人工确认
 
@@ -61,19 +62,22 @@
 
 ```
 ┌─────────────── client.js (Web 设置页, React.createElement 无构建) ───────────────┐
-│  一句话总结 · 「开始扫描C盘」按钮 → connection.api.sessions.prompt("/disk_scan")   │
-│  通用设置: 启用/目标盘/冷废弃天数/扫描范围 → settingsScope.set()                  │
+│  一句话总结 · 「开始扫描C盘」按钮 → remote.commands.execute("/disk_scan")           │
+│    跑完把报告**直接渲染在本页**(DSH 0.1.7 的对话视图不渲染 command 节点)          │
+│  盘符下拉 ← GET /dsh-disk-manager/drives(真实盘符,不再硬编码)                    │
+│  通用设置: 启用/目标盘/冷废弃天数/扫描范围 → configForms.get().set()               │
 └───────────────────────────────┬──────────────────────────────────────────────────┘
-                                │ host 端工具 + 斜杠命令
+                                │ host 端工具 + 斜杠命令 + 只读路由
 ┌───────────────────────────────▼──────────────────────────────────────────────────┐
 │ index.mjs        工具注册(disk_scan/drives/preview/execute/classify/undo)        │
 │                   + /disk_scan 命令(host 直跑,复用 runScan)                      │
+│                   + /dsh-disk-manager/drives 只读路由(设置页盘符)                 │
 │ config.mjs       配置(~/.dsh-disk-manager/config.json) + 分类缓存               │
 │ core/                                                                           │
 │   scanner.mjs    PowerShell 批量量体积 → {name,path,sizeMB,subdirs,lastAccess}   │
 │   active.mjs     进程快照 + 常用白名单(修冷废弃误判)                             │
 │   riskmap.mjs    静态规则库:目录名→A/B/C/D/E 特征映射                             │
-│   classify.mjs   规则→缓存→LLM 三级分类                                          │
+│   classify.mjs   规则→缓存→LLM 三级分类(ctx.llm.stream,默认关推理)               │
 │   safety.mjs     红线判定 + dry-run + undo                                        │
 │   executor.mjs   删/junction/改址执行                                             │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -105,7 +109,9 @@
 dsh plugin --profile web add dsh-disk-manager
 ```
 
-安装后重启 DSH。设置页出现「C盘空间规划整理大师」标签;点「开始扫描C盘」一键扫描,或在对话里直接运行 `/disk_scan` / 调用 `disk_scan` 工具。
+安装后**重启 DSH**。设置页出现「C盘空间规划整理大师」标签;点「开始扫描C盘」一键扫描,或在对话里直接运行 `/disk_scan` / 调用 `disk_scan` 工具。
+
+> **版本要求:DSH 0.1.7 或更高。** 设置页依赖 0.1.7 的 `configForms` 契约;更老的 DSH 上工具仍可用,设置页不出现。
 
 ## 配置文件
 
@@ -133,11 +139,17 @@ dsh-disk-manager/
 
 ## 开发
 
+本包**不带**可独立运行的调试脚本(0.1.0 开发期的 `dev-run.mjs` / `dev-tool.mjs`
+已清理,`.npmignore` 里仍保留对应条目)。本地联调按 link 安装 + 重启实例:
+
 ```bash
-npm install
-node dev-run.mjs      # 只读自测扫描+分类
-node dev-tool.mjs     # 模拟 ctx 走通 apply + disk_scan
+npm install                                   # 装自己的依赖(schemastery)
+dsh plugin --profile web add link:<本目录>     # 或手工在 profile package.json 里加 link: 行 + bundles
+# 改 client.js → 刷新页面即生效；改 index.mjs / core/* → 重启 dsh web
 ```
+
+> 回归自测建议用**隔离实例**(独立 `DSH_HOME` + 另起端口的 `dsh web --no-open` + `node_modules` junction 复用线上),
+> 这样不会打断正在使用的实例。设置页三项验收:分区渲染 / 选盘立即回显 / 「开始扫描C盘」跑完在面板里出报告。
 
 ## License
 

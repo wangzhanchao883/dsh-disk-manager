@@ -28,37 +28,44 @@ function listDrives() {
   }
 }
 
-const settingsSchema = z.object({
-  enabled: z.boolean().default(true),
-  targetDrive: z.string().default(""),
-  abandonDays: z.number().min(1).max(3650).default(DEFAULT_CONFIG.abandonDays),
-  minSizeMB: z.number().min(0).max(10240).default(DEFAULT_CONFIG.minSizeMB),
-  undoLog: z.boolean().default(true),
-  drives: z.array(z.string()).default(["C", "D", "E", "F", "G", "H"]),
-});
+/**
+ * 0.1.7 设置契约：由插件**自己**声明可写字段（`export const Config`），
+ * dsh-settings 照着它投影出表单；不再向 settings 服务注册「schema + 值」。
+ *
+ * 两条硬门禁（违反都是**静默**的，面板直接消失、不打日志）：
+ *   ① 必须具名导出、绝不能有 `export default` —— 否则 loader 剥壳后读不到 `.Config`；
+ *   ② 每个可写字段都要 `.volatile()`（语义：能现场改且改完无需重挂载）——
+ *      一个都没标 → `volatileForm()` 返回 undefined → 整个条目被 describe() 过滤掉。
+ */
+const vol = (schema) => (typeof schema.volatile === "function" ? schema.volatile() : schema);
 
-function toFlat(config, drives) {
-  return {
-    enabled: config.enabled,
-    targetDrive: config.targetDrive,
-    abandonDays: config.abandonDays,
-    minSizeMB: config.minSizeMB,
-    undoLog: config.undoLog,
-    drives: drives || [],
-  };
-}
+const CONFIG_FIELDS = {
+  enabled: vol(z.boolean().default(true)),
+  targetDrive: vol(z.string().default("")),
+  abandonDays: vol(z.number().min(1).max(3650).default(DEFAULT_CONFIG.abandonDays)),
+  minSizeMB: vol(z.number().min(0).max(10240).default(DEFAULT_CONFIG.minSizeMB)),
+  undoLog: vol(z.boolean().default(true)),
+  // drives 是数组字段：前端下拉框要用 set("drives", …) 写入，而 isVolatilePath
+  // 只沿 schema.dict 走、不认 array 的 inner → 必须**整体**盖章，否则写入被拒。
+  drives: vol(z.array(z.string()).default(["C", "D", "E", "F", "G", "H"])),
+};
 
-function fromFlat(flat) {
-  return {
-    enabled: flat.enabled,
-    targetDrive: flat.targetDrive,
-    abandonDays: flat.abandonDays,
-    scanRoots: DEFAULT_CONFIG.scanRoots,
-    minSizeMB: flat.minSizeMB,
-    undoLog: flat.undoLog,
-    blacklist: DEFAULT_CONFIG.blacklist,
-    drives: Array.isArray(flat.drives) ? flat.drives : [],
-  };
+/** 0.1.7 设置契约：纯具名导出（模块里不得出现 export default） */
+export const Config = z.object(CONFIG_FIELDS);
+
+/** 设置里真实存在的字段白名单。只合并这些，避免把 config.json 里的自定义
+ *  scanRoots/blacklist 冲回默认值（旧 fromFlat 会，属既有 bug，此处修正）。 */
+const SETTINGS_FIELDS = ["enabled", "targetDrive", "abandonDays", "minSizeMB", "undoLog", "drives"];
+
+function pickSettings(flat) {
+  const out = {};
+  if (!flat || typeof flat !== "object") return out;
+  for (const k of SETTINGS_FIELDS) {
+    const v = flat[k];
+    if (v === undefined || v === null) continue;
+    out[k] = k === "drives" && !Array.isArray(v) ? [] : v;
+  }
+  return out;
 }
 
 function textTool(definition) {
@@ -68,27 +75,57 @@ function textTool(definition) {
       schema: { type: "string" },
       render: (_args, value) => [{ type: "text", text: value }],
     },
-    presentCall: (args) => ({ card: "generic", kind: "text", title: definition.name, rawInput: args }),
+    // kind 取自 0.1.7 的 ToolCallKind:read|edit|delete|move|search|execute|fetch|other
+    // (旧值 "text" 不在集合内;虽然宿主不做运行期校验,但 UI 取图标会落不到实处)
+    presentCall: (args) => ({ card: "generic", kind: "other", title: definition.name, rawInput: args }),
   });
 }
 
 export function apply(ctx, input = {}) {
   let liveConfig = resolveConfig(input);
 
-  // 设置命名空间:Web 配置界面读写
+  // 设置命名空间:0.1.7 起改由 `export const Config` 声明字段，运行期只做「读」。
+  // 旧的 register+scope.get+scope.watch 三连已废（watch 不存在了）→ 改成需要时
+  // 主动 settings.describe() 重读；服务缺失或老版 DSH 上静默退回传入配置。
   const drives = listDrives();
-  ctx.inject(["settings"], (settingsCtx) => {
+  let settingsService = null;
+  const syncFromSettings = () => {
+    if (!settingsService || typeof settingsService.describe !== "function") return false;
     try {
-      const scope = settingsCtx.settings.register(SETTINGS_NS, settingsSchema, { base: toFlat(liveConfig, drives) });
-      const resolved = scope.get();
-      if (resolved) liveConfig = { ...liveConfig, ...fromFlat(resolved) };
-      scope.watch((next) => {
-        if (!next) return;
-        liveConfig = { ...liveConfig, ...fromFlat(next) };
-      });
+      const row = settingsService.describe().find((it) => it && it.ns === SETTINGS_NS);
+      if (!row || row.value === undefined || row.value === null) return false;
+      liveConfig = { ...liveConfig, ...pickSettings(row.value) };
+      return true;
     } catch (err) {
-      ctx.logger.warn(`dsh-disk-manager: 设置命名空间注册失败:${err.message}`);
+      ctx.logger.warn(`dsh-disk-manager: 读取设置失败(继续用传入配置) - ${err.message}`);
+      return false;
     }
+  };
+  ctx.inject(["settings"], (settingsCtx) => {
+    settingsService = settingsCtx.settings;
+    syncFromSettings();
+  });
+
+  // ---------- Web 路由:把「真实检测到的盘符」喂给设置页下拉框 ----------
+  // 2026-09-26 修:设置页原先硬编码 C~H,与本机真实盘符(只有 C/D)不符。
+  // 客户端拿不到宿主侧 listDrives() 的结果,所以这里开一条只读路由给它。
+  // 参考实现:同款 webServer.register({kind,path,handler})(dshmarket 亦如此)。
+  ctx.inject(["webServer"], (webCtx) => {
+    const dispose = webCtx.webServer.register({
+      kind: "exact",
+      path: "/dsh-disk-manager/drives",
+      handler: (req, res) => {
+        if (req.method !== "GET") {
+          res.writeHead(405, { allow: "GET" });
+          res.end();
+          return;
+        }
+        const body = JSON.stringify({ drives, targetDrive: liveConfig.targetDrive || "" });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+        res.end(body);
+      },
+    });
+    webCtx.effect(() => dispose, "dsh-disk-manager: drives route");
   });
 
   // ---------- 工具 0:查询可用盘符 ----------

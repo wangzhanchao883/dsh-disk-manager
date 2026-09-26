@@ -5,3 +5,7 @@ config.json
 classify-cache.json
 test-data/
 videos/
+
+# 本机 npm 走 npmmirror 镜像,lock 里 65 条 resolved 全指向镜像源;
+# 提交到公开仓库会把镜像固化进去,故不入库(与 dsh-resume-screening 一致)。
+package-lock.json

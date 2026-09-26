@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { classify as ruleClassify, isCategory, CATEGORY_META } from "./riskmap.mjs";
 import { loadClassifyCache, saveClassifyCache } from "../config.mjs";
 
@@ -10,6 +11,79 @@ import { loadClassifyCache, saveClassifyCache } from "../config.mjs";
  * 红线(E)强规则:任何 config/storage/memory/database/.openviking/.qclaw 特征,
  * 即使 LLM 判错,也不自动执行(由 safety.mjs 最终兜底)。
  */
+
+/** 消息生产者身份(v4 会话格式要求每个生产者声明自己的 kind;这里是插件身份)。 */
+const PLUGIN_SOURCE = { kind: "plugin:dsh-disk-manager", form: "instructions" };
+
+/** 懒加载官方 createUserMessage(有就用,没有就退化成等价结构;见 README「可选依赖」)。 */
+let cachedFactory;
+async function loadUserMessageFactory() {
+  if (cachedFactory !== undefined) return cachedFactory;
+  try {
+    const mod = await import("@deepseek-ai/dsh-llm");
+    cachedFactory = typeof mod.createUserMessage === "function" ? mod.createUserMessage : null;
+  } catch {
+    cachedFactory = null;
+  }
+  return cachedFactory;
+}
+
+async function createUserMsg(text) {
+  const factory = await loadUserMessageFactory();
+  const content = [{ type: "text", text }];
+  if (factory) return factory({ content, source: PLUGIN_SOURCE });
+  return { id: randomUUID(), role: "user", content, source: PLUGIN_SOURCE };
+}
+
+/**
+ * 流式取回完整文本。
+ * 2026-09-26 修:旧代码调 `ctx.llm.call(prompt)`,而 0.1.7 的 llm 服务**只有
+ * `stream()`**,没有 `call()` → 每次都走 catch、静默降级成"需人工确认"(看起来
+ * 像"LLM 兜底没用")。现在走真实通道,并按项目规则**默认关闭推理**
+ * (`reasoningEffort: "off"`):结构化输出不需要思维链,而推理 token 与正文共享
+ * `maxTokens`,带推理时会把预算烧光、JSON 一个 token 都吐不出来。
+ */
+async function collectText(llm, options, signal) {
+  const opts = options && options.reasoningEffort ? options : { ...options, reasoningEffort: "off" };
+  let out = "";
+  for await (const chunk of llm.stream({ ...opts, signal })) {
+    if (!chunk || typeof chunk !== "object") continue;
+    if (chunk.type === "text-delta" && typeof chunk.text === "string") out += chunk.text;
+    if (chunk.type === "finish" && chunk.reason && chunk.reason.kind === "error") {
+      const failure = chunk.reason.failure;
+      throw new Error(`llm finish error: ${failure && failure.code ? failure.code : "unknown"}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * 选模型路由:优先"宿主当前默认模型"(用户配的 agent 默认,最贴近实际路由),
+ * 其次第一个可用 provider 的第一个模型;都没有就返回 null(降级为人工确认)。
+ */
+async function resolveModel(ctx) {
+  try {
+    const svc = typeof ctx.get === "function" ? ctx.get("agentDefaultModel") : void 0;
+    const sel = svc && typeof svc.currentSelection === "function" ? svc.currentSelection() : void 0;
+    if (sel && sel.provider && sel.model) return { provider: sel.provider, model: sel.model };
+  } catch {
+    /* 没有该服务就继续往下试 */
+  }
+  try {
+    const llm = ctx.llm;
+    if (!llm || typeof llm.listProviders !== "function") return null;
+    for (const p of llm.listProviders() || []) {
+      const provider = p && (p.id || p.name);
+      if (!provider) continue;
+      const models = typeof llm.listModels === "function" ? await llm.listModels(provider) : [];
+      const first = models && models[0];
+      if (first && (first.id || first.name)) return { provider, model: first.id || first.name };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
 
 /** 把目录特征包组装成给 LLM 的提示文本 */
 function buildLlmPrompt(feature) {
@@ -32,19 +106,28 @@ E 配置/记忆(红线) —— Config/Storage/IndexedDB/MEMORY/数据库/.openvi
 }
 
 /**
- * LLM 兜底判断。通过 ctx.llm? 调用 DSH 自带通道。
- * 若 DSH 通道不可用,返回 { category:null, needUser:true },让前端请求人工确认。
+ * LLM 兜底判断:走 `ctx.llm.stream()`(0.1.7 的真实通道)。
+ * 任何一环不可用(没有 llm 服务 / 没有可用模型路由 / 调用失败 / 返回无 JSON)
+ * 都返回 { category:null, needUser:true },交人工确认——不炸、不阻断扫描。
  */
 async function llmClassify(ctx, feature) {
   try {
     const prompt = buildLlmPrompt(feature);
-    if (!ctx.llm || typeof ctx.llm.call !== "function") {
-      throw new Error("DSH LLM 通道不可用");
+    if (!ctx.llm || typeof ctx.llm.stream !== "function") {
+      throw new Error("DSH LLM 通道不可用(ctx.llm.stream 缺失)");
     }
-    const resp = await ctx.llm.call(prompt);
-    const text = typeof resp === "string" ? resp : resp?.content ?? JSON.stringify(resp);
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("LLM 返回无 JSON");
+    const route = await resolveModel(ctx);
+    if (!route) throw new Error("没有可用的模型路由(agentDefaultModel / listProviders 都为空)");
+    const message = await createUserMsg(prompt);
+    const text = await collectText(ctx.llm, {
+      provider: route.provider,
+      model: route.model,
+      messages: [message],
+      // 结构化分类是小任务:关推理 + 给足余量(见项目规则:推理 token 与正文共享预算)
+      maxTokens: 2000,
+    });
+    const match = String(text || "").match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`LLM 返回无 JSON(${String(text || "").slice(0, 80) || "空输出"})`);
     const parsed = JSON.parse(match[0]);
     const cat = String(parsed.category || "").trim().toUpperCase();
     if (!isCategory(cat)) throw new Error(`LLM 返回非法类别: ${cat}`);
@@ -59,6 +142,8 @@ async function llmClassify(ctx, feature) {
     return { category: null, confidence: "low", reason: `LLM 失败: ${e.message}`, source: "llm-failed", needUser: true };
   }
 }
+
+export { collectText, resolveModel, createUserMsg };
 
 /**
  * 主分类入口。
