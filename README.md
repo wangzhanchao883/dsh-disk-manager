@@ -44,7 +44,8 @@
 
 - **Windows**(扫描与执行依赖 PowerShell;junction/删除用系统原生能力)。
 - **Node.js** ≥ 22(DSH 运行时)。
-- **DeepSeek Harness ≥ 0.1.7**(web profile,插件安装进 web 使用)。
+- **DeepSeek Harness 0.1.7 ~ 0.2.x**(web profile,插件安装进 web 使用)。
+  - **0.2 已实测可用**:本机在 `0.2.0-rc.1` 上完整跑通(host 工具 + 浏览器端设置页),`peerDependencies` 上界已随之从 `<0.2.0-0` 抬到 `<0.3.0-0`。
   - 设置页依赖 0.1.7 的客户端 `configForms` 契约;在更老的 DSH 上 host 侧工具照常可用,只是设置页不会出现。
 - LLM 兜底(可选,不配也能用):走宿主 `ctx.llm.stream()`。模型路由优先取宿主的 **agent 默认模型**,取不到则用第一个可用 provider 的第一个模型;按项目规则**默认关闭推理**(`reasoningEffort:"off"`)。拿不到模型路由时,未知目录降级为"需人工确认",不影响扫描。
 
