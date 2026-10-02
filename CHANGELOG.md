@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 (2026-10-02)
+
+**发布通道迁移 —— 无代码变更、无行为变更。**
+
+改用 npm Trusted Publishing（GitHub Actions + OIDC）发布，不再依赖任何长期令牌。
+本版本用于验证新的发布链路，并让该版本带上 provenance（可验证的来源证明）。
+
 ## 0.1.2 (2026-09-29)
 
 **兼容 DSH 0.2 / DSH 0.2 compatibility**(本机在 `0.2.0-rc.1` 实测通过)。**无代码变更。**
